@@ -1,0 +1,650 @@
+from yt.data_objects.particle_filters import add_particle_filter
+from yt.utilities.physical_constants import mp, kb, mh
+from yt.utilities.cosmology import Cosmology
+from yt import YTArray
+from agora_analysis.utils import convert_T_over_mu_to_T_func,agora_Zsun
+import numpy as np
+
+PartType_Gas_to_use_dict = {
+    'enzo': 'gas',
+    'gizmo': 'PartType0'
+}
+
+PartType_Star_to_use_dict = {
+    'enzo': 'Stars',
+    'gizmo': 'PartType4'
+}
+
+PartType_StarBeforeFiltered_to_use_dict = {
+    'enzo': 'all',
+    'gizmo': 'PartType4'
+}
+
+GasMassType_to_use_dict = {
+    'enzo': 'cell_mass',
+    'gizmo': 'Masses'
+}
+
+GasDensityType_to_use_dict = {
+    'enzo': 'density',
+    'gizmo': 'Density'
+}
+
+StarMassType_to_use_dict = {
+    'enzo': 'particle_mass',
+    'gizmo': 'Masses'
+}
+
+FormationTimeType_to_use_dict = {
+    'enzo': 'creation_time',
+    'gizmo': 'StellarFormationTime'
+}
+
+StarMetallicityType_to_use_dict = {
+    'enzo': 'metallicity_fraction',
+    'gizmo': 'metallicity'
+}
+
+grid_codes = ['enzo']
+particle_codes = ['gizmo']
+
+
+def add_gas_fields(snap):
+    pf = snap.ds
+    code = snap.code
+    PartType_Gas_to_use = PartType_Gas_to_use_dict[code]
+    GasMassType_to_use = GasMassType_to_use_dict[code]
+    GasDensityType_to_use = GasDensityType_to_use_dict[code]
+    sampling_type = 'cell' if code in grid_codes else 'particle'
+    def gas_mass(field, data):
+        return data[PartType_Gas_to_use,GasMassType_to_use]
+    pf.add_field(('gas','agora_mass'),
+                    sampling_type = sampling_type,
+                    function = gas_mass,
+                    force_override = True,
+                    display_name="Gas Mass",
+                    units = 'Msun')
+    def gas_density(field, data):
+        return data[PartType_Gas_to_use,GasDensityType_to_use]
+    pf.add_field(('gas','agora_density'),
+                    sampling_type = sampling_type,
+                    function = gas_density,
+                    force_override = True,
+                    display_name="Gas Density",
+                    units = 'g/cm**3')
+    def gas_number_density(field, data):
+        return data['gas','agora_density']/mh
+    pf.add_field(('gas','agora_number_density'),
+                    sampling_type = sampling_type,
+                    function = gas_number_density,
+                    force_override = True,
+                    display_name="Gas Number Density",
+                    units = '1/cm**3')
+    def density_squared(field, data):
+        return data[(PartType_Gas_to_use, GasDensityType_to_use)]**2
+    pf.add_field(("gas", "agora_density_squared"),
+                 function=density_squared, 
+                 sampling_type = sampling_type,
+                 units="g**2/cm**6")
+
+
+
+def add_star_fields(snap):
+    pf = snap.ds
+    code = snap.code
+    PartType_Star_to_use = PartType_Star_to_use_dict[code]
+    PartType_StarBeforeFiltered_to_use = PartType_StarBeforeFiltered_to_use_dict[code]
+    FormationTimeType_to_use = FormationTimeType_to_use_dict[code]
+    StarMetallicityType_to_use = StarMetallicityType_to_use_dict[code]
+    StarMassType_to_use = StarMassType_to_use_dict[code]
+
+    # Add particle filter for agora_stars based on formation time > 0
+    def agora_stars(pfilter, data):
+        return (data[(pfilter.filtered_type, FormationTimeType_to_use)] > 0)
+    add_particle_filter('agora_stars', function=agora_stars,
+                        filtered_type=PartType_StarBeforeFiltered_to_use,
+                        requires=[FormationTimeType_to_use])
+    pf.add_particle_filter('agora_stars')
+
+    # Add metallicity field for agora_stars
+    def star_metallicity(field, data):
+        return data['agora_stars', StarMetallicityType_to_use].in_units('') / agora_Zsun
+    pf.add_field(('agora_stars', 'agora_metallicity'),
+                 sampling_type='particle',
+                 function=star_metallicity,
+                 force_override=True,
+                 display_name="Metallicity",
+                 # it is in solar metallicity units!
+                 # however unyt does not automatically convert them so we say units = ''
+                 units='')
+
+    # Add star mass field for agora_stars
+    def star_mass(field, data):
+        return data['agora_stars', StarMassType_to_use]
+    pf.add_field(('agora_stars', 'agora_mass'),
+                 sampling_type='particle',
+                 function=star_mass,
+                 display_name="Star Mass",
+                 force_override=True,
+                 units='Msun')
+
+
+
+def add_metallicity_fields(snap):
+    pf = snap.ds
+    code = snap.code
+    sampling_type = snap.sampling_type
+    PartType_Gas_to_use = PartType_Gas_to_use_dict[code]
+    if code == 'enzo':
+        def enzo_metallicity(field, data):
+            return data["gas", "metal_density"] / data["gas", "density"]/agora_Zsun
+        pf.add_field(("gas", "agora_metallicity"), 
+                     function=enzo_metallicity, 
+                     force_override=True, 
+                     display_name="Metallicity", 
+                     sampling_type = 'cell',
+                     take_log=True, 
+                    #it is in solar metallicity units!
+                    #however unyt does not automatically
+                    #convert them so we say units = ''                      
+                     units="")
+    else:
+        def gas_metallicity(field, data):
+            return data['gas',"metallicity"].in_units('')/agora_Zsun
+        pf.add_field(('gas','agora_metallicity'),
+                    sampling_type = sampling_type,
+                    function = gas_metallicity,
+                    force_override = True,
+                    display_name="Metallicity", 
+                    #it is in solar metallicity units!
+                    #however unyt does not automatically
+                    #convert them so we say units = ''  
+                     units = '')
+    def primordial_gas_metallicity(field, data):
+        return data['gas',"agora_metallicity"]*0.0+1e-4
+    pf.add_field(('gas','agora_primordial_metallicity'),
+                sampling_type = sampling_type,
+                function = primordial_gas_metallicity,
+                force_override = True,
+                display_name="Primordial Metallicity", 
+                #it is in solar metallicity units!
+                #however unyt does not automatically
+                #convert them so we say units = ''  
+                 units = '')
+
+def add_resolution_fields(snap):
+    pf = snap.ds
+    code = snap.code
+    if code in grid_codes:
+        def cell_volume(field,data):
+            return data[("index", "cell_volume")]
+        pf.add_field(("gas", "agora_cell_volume"),function=cell_volume,sampling_type = 'cell',
+                     units='kpc**3', display_name="Resolution $\Delta$ x", take_log=True )
+        def inverse_cell_volume_squared(field,data):
+            return data[("index", "cell_volume")]**-2
+        pf.add_field(("gas", "agora_cell_volume_inv2"), function=inverse_cell_volume_squared, \
+                     units='pc**(-6)',sampling_type = 'cell',
+                     display_name="Inv2CellVolumeCode", take_log=True)
+    elif code in particle_codes:
+        def particle_volume(field, data):
+            return data[('gas', 'agora_mass')]/data[('gas', "agora_density")]
+        pf.add_field(('gas', "agora_particle_volume"), 
+                     function=particle_volume, 
+                     units="kpc**3", 
+                     display_name="Resolution $\Delta$ x", 
+                     sampling_type = 'particle',
+                     take_log=True)
+        def inverse_particle_size_squared(field, data):
+            return (data[('gas', 'agora_mass')]/data[('gas', "agora_density")])**(-2.)
+        pf.add_field(('gas', "agora_particle_volume_inv2"), 
+                     function=inverse_particle_size_squared, 
+                     units="pc**(-6)", 
+                     display_name="Inv2ParticleVolume", 
+                     sampling_type = 'particle',
+                     take_log=True)
+            
+def add_temperature_fields(snap):
+    pf = snap.ds
+    code = snap.code
+    convert_T_over_mu_to_T = convert_T_over_mu_to_T_func()
+    PartType_Gas_to_use = PartType_Gas_to_use_dict[code]
+    sampling_type = 'cell' if code in grid_codes else 'particle'
+    
+    if code == 'gizmo':
+        def gizmo_temp(field, data):
+            # Assume cosmic abundances
+            x_H = 0.76
+            gamma = 5.0/3.0
+            if data.has_field_parameter(('gas',"mean_molecular_weight")):
+                mu = data.get_field_parameter(('gas',"mean_molecular_weight"))
+            else:
+                # Assume zero ionization
+                mu = 4.0 / (3.0 * x_H + 1.0)
+            ret = data[PartType_Gas_to_use, "InternalEnergy"]*(gamma-1)*mu*mp/kb
+            return ret.in_units('K')
+        pf.add_field(('gas', 'agora_temperature'), 
+                     function=gizmo_temp,
+                     force_override=True,
+                     sampling_type = 'particle',
+                     display_name="Temperature",
+                     take_log=True,
+                     units="K")
+
+    else:
+        def gas_temperature(field,data):
+            return data[PartType_Gas_to_use,'temperature']
+        pf.add_field(('gas','agora_temperature'),
+                        sampling_type = sampling_type,
+                        function = gas_temperature,
+                        force_override = True,
+                        display_name="Temperature",
+                        take_log=True,
+                        units = 'K')
+        
+    #if we have our own log_T field, TRIDENT won't make a new one
+    #we can exploit this to force TRIDENT to use agora_temperature
+    #rather than regular temperature (which is impossible to
+    #override)
+    def _log_T(field, data):
+        return np.log10(data["gas", "agora_temperature"])
+    pf.add_field(('gas','log_T'),
+                    sampling_type = sampling_type,
+                    function = _log_T,
+                    force_override = True,
+                    display_name="log Temperature",
+                    take_log=False,
+                    units = '')
+
+def add_pressure_fields(snap):
+    pf = snap.ds
+    code = snap.code
+    def gas_pressure(field,data):
+        return data['gas','temperature']*data['gas','number_density']
+    pf.add_field(('gas','agora_pressure'),
+                    sampling_type = snap.sampling_type,
+                    function = gas_pressure,
+                    force_override = True,
+                    display_name=r"$\rm{Pressure}/k_B$",
+                    take_log=True,
+                    units = 'K/cm**3')
+
+def add_new_star_ages(snap):
+    pf = snap.ds
+    code = snap.code
+    FormationTimeType_to_use=FormationTimeType_to_use_dict[code]
+    PartType_Star_to_use=PartType_Star_to_use_dict[code]
+    def new_age(field,data):
+        formation_z=1./pf.arr(data[(PartType_Star_to_use,FormationTimeType_to_use)],'')-1.
+        yt_cosmo=Cosmology()
+        return pf.current_time.in_units('Gyr')-yt_cosmo.t_from_z(formation_z).in_units('Gyr')
+    pf.add_field(('agora_stars','particle_ages'), 
+                 function=new_age,  
+                 sampling_type = 'particle',
+                 units="Gyr")
+        
+def add_radial_distance_fields(snap):
+    ds = snap.ds
+    def radial_distance(field,data):
+        xdist = data['gas','x']-snap.center_x
+        ydist = data['gas','y']-snap.center_y
+        zdist = data['gas','z']-snap.center_z
+        return np.sqrt(xdist**2+ydist**2+zdist**2)
+    ds.add_field(('gas','radial_distance'),function = radial_distance,
+                 units = 'kpc',sampling_type = snap.sampling_type,force_override = True)
+    def star_radial_distance(field,data):
+        xdist = data['agora_stars','particle_position_x']-snap.center_x
+        ydist = data['agora_stars','particle_position_y']-snap.center_y
+        zdist = data['agora_stars','particle_position_z']-snap.center_z
+        return np.sqrt(xdist**2+ydist**2+zdist**2)
+    ds.add_field(('agora_stars','radial_distance'),function = star_radial_distance,
+                 units = 'kpc',sampling_type = 'particle',force_override = True)
+
+
+"""# Load scale factor and halo center from Rockstar catalog
+def load_scale_factor_and_halo_center(catalog_file):
+    import pandas as pd
+    df = pd.read_csv(catalog_file, delim_whitespace=True, comment='#')
+    most_massive = df.loc[df['Mvir'].idxmax()]
+    scale = most_massive['scale']
+    x, y, z = most_massive['x'], most_massive['y'], most_massive['z']
+    rvir = most_massive['rvir']
+    center = [x, y, z]
+    return scale, center, rvir"""
+
+def load_scale_factor_and_halo_center(halo_path):
+    scale_factor = None
+    with open(halo_path, 'r') as f:
+        for line in f:
+            if line.startswith('#a ='):
+                scale_factor = float(line.strip().split('=')[1])
+                break
+    if scale_factor is None:
+        raise RuntimeError(f"Scale factor not found in {halo_path}")
+
+    # Load halo catalog into pandas
+    col_names = [
+        "ID", "DescID", "Mvir", "Vmax", "Vrms", "Rvir", "Rs", "Np", 
+        "X", "Y", "Z", "VX", "VY", "VZ", "JX", "JY", "JZ", "Spin",
+        "rs_klypin", "Mvir_all", "M200b", "M200c", "M500c", "M2500c",
+        "Xoff", "Voff", "spin_bullock", "b_to_a", "c_to_a",
+        "A[x]", "A[y]", "A[z]", "b_to_a(500c)", "c_to_a(500c)",
+        "A[x](500c)", "A[y](500c)", "A[z](500c)", "T/|U|",
+        "M_pe_Behroozi", "M_pe_Diemer", "Type", "SM", "Gas", "BH_Mass"
+    ]
+    df = pd.read_csv(halo_path, delim_whitespace=True, comment='#', header=None)
+    df.columns = col_names
+    df_sorted = df.sort_values(by="Mvir", ascending=False)
+    halo = df_sorted.iloc[0]
+
+    # Physical box size in Mpc/h (5 Mpc/h box)
+    box_width_physical_mpc = 5 * scale_factor  # scale factor included
+
+    # Halo center coordinates in physical units (Mpc/h)
+    halo_center_phys = np.array([halo["X"], halo["Y"], halo["Z"]])
+
+    # Convert halo center from Mpc/h to kpc/h
+    halo_center_kpc_h = halo_center_phys * 1000.0
+
+    # Convert virial radius to physical kpc (assuming h=0.702 for Gizmo)
+    r_vir_phys_kpc = halo["Rvir"] * scale_factor / 0.702
+
+    return scale_factor, halo_center_kpc_h, r_vir_phys_kpc
+
+
+
+
+
+
+
+
+
+
+import yt
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import AxesGrid
+
+# DummySnap, load_scale_factor_and_halo_center, add_gas_fields, add_temperature_fields
+# assumed defined above as in your code
+
+# DummySnap class to provide context to AGORA fields
+class DummySnap:
+    def __init__(self, ds, code="gizmo"):
+        self.ds = ds
+        self.code = code
+        self.sampling_type = 'particle'  # for gizmo
+        self.center_x = 0
+        self.center_y = 0
+        self.center_z = 0
+
+
+
+# Snapshots and halos for gizmo_80 (left col)
+snapshots_80 = {
+    4: "/data/eugenelee/gizmo_5e51/80pc/output/snapshot_043.hdf5",
+    2: "/data/eugenelee/gizmo_5e51/80pc/output/snapshot_051.hdf5",
+    1: "/data/eugenelee/gizmo_5e51/80pc/output/snapshot_055.hdf5",
+}
+
+halo_catalogs_80 = {
+    4: "/data/eugenelee/gizmo_5e51/80pc/output/halo/out_42.list",
+    2: "/data/eugenelee/gizmo_5e51/80pc/output/halo/out_50.list",
+    1: "/data/eugenelee/gizmo_5e51/80pc/output/halo/out_54.list",
+}
+
+# Snapshots and halos for gizmo_40 (right col)
+snapshots_40 = {
+    4: "/data/eugenelee/gizmo_5e51/40pc/output/snapshot_043.hdf5",
+    2: "/data/eugenelee/gizmo_5e51/40pc/output/snapshot_051.hdf5",
+    1: "/data/eugenelee/gizmo_5e51/40pc/output/snapshot_055.hdf5",
+}
+
+halo_catalogs_40 = {
+    4: "/data/eugenelee/gizmo_5e51/40pc/output/halo/out_42.list",
+    2: "/data/eugenelee/gizmo_5e51/40pc/output/halo/out_50.list",
+    1: "/data/eugenelee/gizmo_5e51/40pc/output/halo/out_54.list",
+}
+
+fig = plt.figure(figsize=(12, 15), dpi=1000)
+
+grid = AxesGrid(
+    fig,
+    rect=(0.1, 0.1, 0.82, 0.82),
+    nrows_ncols=(3, 2),    # 3 rows, 2 columns
+    axes_pad=0.02,
+    label_mode="1",
+    share_all=True,
+    cbar_location="right",
+    cbar_mode="single",
+    cbar_size="1.5%",
+    cbar_pad="1%",
+    aspect=False,
+)
+
+redshifts = sorted(snapshots_80.keys(), reverse=True)  # [4, 2, 1]
+
+for i, z in enumerate(redshifts):
+    # Left column (col 0) GIZMO 80pc
+    ds80 = yt.load(snapshots_80[z])
+    scale_factor80, halo_center80, r_vir80 = load_scale_factor_and_halo_center(halo_catalogs_80[z])
+    snap80 = DummySnap(ds80)
+    add_gas_fields(snap80)
+    add_temperature_fields(snap80)
+    sp80 = ds80.sphere(halo_center80, (r_vir80, "kpc"))
+    
+    p80 = yt.PhasePlot(
+        sp80,
+        ("gas", "agora_density"),
+        ("gas", "agora_temperature"),
+        [("gas", "agora_mass")],
+        weight_field=None
+    )
+    p80.set_xlim(2e-29, 7e-24)
+    p80.set_ylim(2e2, 7e6)
+    p80.set_zlim(("gas", "agora_mass"), 3e2, 2e6)
+    p80.set_xlabel("Density [g/cm³]")
+    p80.set_ylabel("Temperature [K]")
+    
+    plot80 = p80.plots[("gas", "agora_mass")]
+    plot80.figure = fig
+    plot80.axes = grid[i * 2].axes  # i-th row, 1st col (col=0)
+    if i == 0:
+        plot80.cax = grid.cbar_axes[0]
+    p80.render()
+    
+    plot80.axes.text(
+        0.025, 0.05, f"z = {z} (80pc)", 
+        transform=plot80.axes.transAxes, 
+        fontsize=12, 
+        color='white', 
+        ha='left', 
+        va='bottom',
+        bbox=dict(facecolor='black', alpha=0.5, boxstyle='round,pad=0.3')
+    )
+    
+    # Right column (col 1) GIZMO 40pc
+    ds40 = yt.load(snapshots_40[z])
+    scale_factor40, halo_center40, r_vir40 = load_scale_factor_and_halo_center(halo_catalogs_40[z])
+    snap40 = DummySnap(ds40)
+    add_gas_fields(snap40)
+    add_temperature_fields(snap40)
+    sp40 = ds40.sphere(halo_center40, (r_vir40, "kpc"))
+    
+    p40 = yt.PhasePlot(
+        sp40,
+        ("gas", "agora_density"),
+        ("gas", "agora_temperature"),
+        [("gas", "agora_mass")],
+        weight_field=None
+    )
+    p40.set_xlim(2e-29, 7e-24)
+    p40.set_ylim(2e2, 7e6)
+    p40.set_zlim(("gas", "agora_mass"), 3e2, 2e6)
+    p40.set_xlabel("Density [g/cm³]")
+    p40.set_ylabel("Temperature [K]")
+    
+    plot40 = p40.plots[("gas", "agora_mass")]
+    plot40.figure = fig
+    plot40.axes = grid[i * 2 + 1].axes  # i-th row, 2nd col (col=1)
+    if i == 0:
+        plot40.cax = grid.cbar_axes[0]
+    p40.render()
+    
+    plot40.axes.text(
+        0.025, 0.05, f"z = {z} (40pc)", 
+        transform=plot40.axes.transAxes, 
+        fontsize=12, 
+        color='white', 
+        ha='left', 
+        va='bottom',
+        bbox=dict(facecolor='black', alpha=0.5, boxstyle='round,pad=0.3')
+    )
+
+plt.tight_layout()
+plt.show()
+
+
+
+
+
+
+
+## 2X3 plots for the conferece:
+import yt
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import AxesGrid
+
+# DummySnap, load_scale_factor_and_halo_center, add_gas_fields, add_temperature_fields
+# assumed defined above as in your code
+
+# DummySnap class to provide context to AGORA fields
+class DummySnap:
+    def __init__(self, ds, code="gizmo"):
+        self.ds = ds
+        self.code = code
+        self.sampling_type = 'particle'  # for gizmo
+        self.center_x = 0
+        self.center_y = 0
+        self.center_z = 0
+
+
+
+import matplotlib.pyplot as plt
+fig = plt.figure(figsize=(18, 10), dpi=1000)
+
+grid = AxesGrid(
+    fig,
+    rect=(0.1, 0.1, 0.82, 0.82),
+    nrows_ncols=(2, 3),  # 2 rows, 3 columns
+    axes_pad=0.02,
+    label_mode="1",
+    share_all=True,
+    cbar_location="right",
+    cbar_mode="single",
+    cbar_size="1.5%",
+    cbar_pad="1%",
+    aspect=False,
+)
+
+redshifts = sorted(snapshots_80.keys(), reverse=True)  # [4, 2, 1]
+
+xmin = 2e-29
+xmax = 3e-23
+ymin = 1e3
+ymax = 7e6
+zmin =3e2
+zmax =2e6
+
+# First row: 80pc runs
+for i, z in enumerate(redshifts):
+    ds80 = yt.load(snapshots_80[z])
+    scale_factor80, halo_center80, r_vir80 = load_scale_factor_and_halo_center(halo_catalogs_80[z])
+    snap80 = DummySnap(ds80)
+    add_gas_fields(snap80)
+    add_temperature_fields(snap80)
+    sp80 = ds80.sphere(halo_center80, (r_vir80, "kpc"))
+
+    p80 = yt.PhasePlot(
+        sp80,
+        ("gas", "agora_density"),
+        ("gas", "agora_temperature"),
+        [("gas", "agora_mass")],
+        weight_field=None
+    )
+    p80.set_xlim(xmin, xmax)
+    p80.set_ylim(ymin, ymax)
+    p80.set_zlim(("gas", "agora_mass"), zmin, zmax)
+    p80.set_xlabel("Density [g/cm³]")
+    p80.set_ylabel("Temperature [K]")
+
+    plot80 = p80.plots[("gas", "agora_mass")]
+    plot80.figure = fig
+    plot80.axes = grid[i].axes  # first row, column i
+    if i == 0:
+        plot80.cax = grid.cbar_axes[0]
+    p80.render()
+    
+    plot80.axes.axvline(1.674e-24, color='black', linestyle='--', linewidth=1.5)
+    plot80.axes.text(
+    0.04, 0.05, f"z = {z} (80pc)",
+    transform=plot80.axes.transAxes,
+    fontsize=13,
+    color='black',  # black text
+    ha='left',
+    va='bottom',
+    bbox=dict(
+        facecolor='white',      # white background
+        edgecolor='black',      # black border
+        boxstyle='round,pad=0.3'))
+
+
+
+
+        
+# Second row: 40pc runs
+for i, z in enumerate(redshifts):
+    ds40 = yt.load(snapshots_40[z])
+    scale_factor40, halo_center40, r_vir40 = load_scale_factor_and_halo_center(halo_catalogs_40[z])
+    snap40 = DummySnap(ds40)
+    add_gas_fields(snap40)
+    add_temperature_fields(snap40)
+    sp40 = ds40.sphere(halo_center40, (r_vir40, "kpc"))
+
+    p40 = yt.PhasePlot(
+        sp40,
+        ("gas", "agora_density"),
+        ("gas", "agora_temperature"),
+        [("gas", "agora_mass")],
+        weight_field=None
+    )
+    p40.set_xlim(xmin, xmax)
+    p40.set_ylim(ymin, ymax)
+    p40.set_zlim(("gas", "agora_mass"), zmin, zmax)
+    p40.set_xlabel("Density [g/cm³]")
+    p40.set_ylabel("Temperature [K]")
+
+    plot40 = p40.plots[("gas", "agora_mass")]
+    plot40.figure = fig
+    plot40.axes = grid[i + 3].axes  # second row, columns 0,1,2 correspond to indices 3,4,5
+    if i == 0:
+        plot40.cax = grid.cbar_axes[0]
+    
+    p40.render()
+    plot40.axes.axvline(1.674e-24, color='black', linestyle='--', linewidth=1.5)
+    plot40.axes.text(
+    0.04, 0.05, f"z = {z} (40pc)",
+    transform=plot40.axes.transAxes,
+    fontsize=13,
+    color='black',  # black text
+    ha='left',
+    va='bottom',
+    bbox=dict(
+        facecolor='white',      # white background
+        edgecolor='black',      # black border
+        boxstyle='round,pad=0.3'))
+
+plt.tight_layout()
+plt.savefig("SC_PDF.png", dpi=400, bbox_inches="tight")  # Save first
